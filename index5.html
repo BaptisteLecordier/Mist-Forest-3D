@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Forêt Embrumée - Three.js</title>
+    <style>
+        /* ----- RESET ----- */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+
+        /* ----- OVERLAY DE DÉPART ----- */
+        #start {
+            position: absolute;
+            inset: 0;
+            background: rgba(0,0,0,0.9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            color: white;
+            z-index: 10;
+            cursor: pointer;
+            text-align: center;
+        }
+
+        #start h1 {
+            margin-bottom: 20px;
+            font-size: 32px;
+            text-shadow: 0 0 10px #fff;
+        }
+
+        #start p {
+            margin-bottom: 15px;
+            opacity: 0.8;
+        }
+
+        #start button {
+            padding: 15px 30px;
+            font-size: 18px;
+            border: none;
+            border-radius: 5px;
+            background: #333;
+            color: white;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        #start button:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body>
+
+<!-- ⚠️ NE PAS SUPPRIMER CE DIV -->
+<div id="start">
+    <h1>Forêt embrumée</h1>
+    <p>Cliquer pour entrer (ZQSD / WASD pour bouger, souris pour regarder)</p>
+    <button>Entrer dans la forêt</button>
+</div>
+
+
+<script type="module">
+import * as THREE from 'https://esm.sh/three@0.159.0';
+
+let scene, camera, renderer;
+let groundMesh;
+const colliders = [];
+
+const TREE_COUNT = 400;
+const PLAYER_RADIUS = 1;
+const MOVE_SPEED = 10;
+const FORBIDDEN_RADIUS = 12;
+const TERRAIN_SIZE = 2000;
+const TERRAIN_SEGMENTS = 200;
+const EYE_HEIGHT = 1.7;
+
+const keys = { forward: false, backward: false, left: false, right: false };
+let isLocked = false;
+let yaw = 0;
+let pitch = 0;
+let lastTime = performance.now();
+
+const raycaster = new THREE.Raycaster();
+const DOWN = new THREE.Vector3(0, -1, 0);
+
+/* ---------- PERLIN POUR LA DENSITÉ ---------- */
+
+const Perlin = (() => {
+    const permutation = [
+        151,160,137,91,90,15,
+        131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,
+        8,99,37,240,21,10,23,
+        190, 6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,
+        35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,
+        168, 68,175,74,165,71,134,139,48,27,166,77,146,158,231,
+        83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,
+        40,244,102,143,54, 65,25,63,161,1,216,80,73,209,76,132,
+        187,208, 89,18,169,200,196,135,130,116,188,159,86,164,
+        100,109,198,173,186, 3,64,52,217,226,250,124,123,5,202,
+        38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,
+        17,182,189,28,42,223,183,170,213,119,248,152, 2,44,154,
+        163,70,221,153,101,155,167, 43,172,9,129,22,39,253, 19,
+        98,108,110,79,113,224,232,178,185, 112,104,218,246,97,
+        228,251,34,242,193,238,210,144,12,191,179,162,241, 81,
+        51,145,235,249,14,239,107,49,192,214, 31,181,199,106,
+        157,184, 84,204,176,115,121,50,45,127, 4,150,254
+    ];
+    const p = new Array(512);
+    for (let i = 0; i < 256; i++) {
+        p[i] = p[i + 256] = permutation[i];
+    }
+    function fade(t) {
+        return t * t * t * (t * (t * 6 - 15) + 10);
+    }
+    function lerp(t, a, b) {
+        return a + t * (b - a);
+    }
+    function grad(hash, x, y, z) {
+        const h = hash & 15;
+        const u = h < 8 ? x : y;
+        const v = h < 4 ? y : (h === 12 || h === 14 ? x : z);
+        return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+    }
+    function noise(x, y, z = 0) {
+        const X = Math.floor(x) & 255;
+        const Y = Math.floor(y) & 255;
+        const Z = Math.floor(z) & 255;
+
+        x -= Math.floor(x);
+        y -= Math.floor(y);
+        z -= Math.floor(z);
+
+        const u = fade(x);
+        const v = fade(y);
+        const w = fade(z);
+
+        const A  = p[X] + Y;
+        const AA = p[A] + Z;
+        const AB = p[A + 1] + Z;
+        const B  = p[X + 1] + Y;
+        const BA = p[B] + Z;
+        const BB = p[B + 1] + Z;
+
+        return lerp(w,
+            lerp(v,
+                lerp(u, grad(p[AA], x, y, z),
+                        grad(p[BA], x - 1, y, z)),
+                lerp(u, grad(p[AB], x, y - 1, z),
+                        grad(p[BB], x - 1, y - 1, z))
+            ),
+            lerp(v,
+                lerp(u, grad(p[AA + 1], x, y, z - 1),
+                        grad(p[BA + 1], x - 1, y, z - 1)),
+                lerp(u, grad(p[AB + 1], x, y - 1, z - 1),
+                        grad(p[BB + 1], x - 1, y - 1, z - 1))
+            )
+        );
+    }
+    function noise2D(x, y) {
+        return noise(x, y, 0);
+    }
+    return { noise2D };
+})();
+
+/* ---------- RELIEF DU SOL POUR LE MESH ---------- */
+
+function terrainHeight(x, z) {
+    const h1 = Math.sin(x * 0.004) * 10;
+    const h2 = Math.cos(z * 0.003) * 8;
+    const h3 = Math.sin((x + z) * 0.0025) * 5;
+    return h1 + h2 + h3;
+}
+
+/* Densité d’arbres [0,1] */
+function densityAt(x, z) {
+    const scale = 0.0012;
+    const n = Perlin.noise2D(x * scale + 100, z * scale + 50);
+    return (n + 1) / 2;
+}
+
+/* Hauteur RÉELLE du sol via raycast sur groundMesh */
+function groundHeightAt(x, z) {
+    if (!groundMesh) return 0;
+    raycaster.set(new THREE.Vector3(x, 1000, z), DOWN);
+    const hits = raycaster.intersectObject(groundMesh, false);
+    if (hits.length > 0) return hits[0].point.y;
+    return 0;
+}
+
+/* ---------- INIT ---------- */
+
+function init() {
+    scene = new THREE.Scene();
+
+    scene.background = new THREE.Color(0xBFC5C8);
+    scene.fog = new THREE.FogExp2(0xD0D4D6, 0.012);
+
+    camera = new THREE.PerspectiveCamera(
+        75,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000
+    );
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.9);
+    scene.add(ambient);
+
+    const sunlight = new THREE.DirectionalLight(0xFFEED0, 1.1);
+    sunlight.position.set(120, 250, -180);
+    scene.add(sunlight);
+
+    const fillLight = new THREE.DirectionalLight(0xC7D8F0, 0.5);
+    fillLight.position.set(-80, 180, 60);
+    scene.add(fillLight);
+
+    // ---------- TERRAIN ----------
+    const groundGeo = new THREE.PlaneGeometry(
+        TERRAIN_SIZE,
+        TERRAIN_SIZE,
+        TERRAIN_SEGMENTS,
+        TERRAIN_SEGMENTS
+    );
+    groundGeo.rotateX(-Math.PI / 2); // utiliser XZ
+
+    const pos = groundGeo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i);
+        const z = pos.getZ(i);
+        const h = terrainHeight(x, z);
+        pos.setY(i, h);
+    }
+    pos.needsUpdate = true;
+    groundGeo.computeVertexNormals();
+
+    const groundMat = new THREE.MeshPhongMaterial({ color: 0x4F7D3A });
+    groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    scene.add(groundMesh);
+
+    // ---------- DÉCOR ----------
+    generateForest();
+    generateRocks();
+    generateStumps();
+    generateBushes();
+
+    placePlayerAtSpawn();
+
+    setupKeyboardControls();
+    setupPointerLock();
+    window.addEventListener('resize', onResize);
+}
+
+/* ---------- COLLISIONS / SPAWN ---------- */
+
+function isPositionFree(x, z, margin = 0) {
+    for (const col of colliders) {
+        const dx = x - col.x;
+        const dz = z - col.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < col.radius + PLAYER_RADIUS + margin) return false;
+    }
+    return true;
+}
+
+function placePlayerAtSpawn() {
+    let x = 0;
+    let z = 0;
+
+    if (!isPositionFree(0, 0, 1)) {
+        let tries = 0;
+        while (tries < 200) {
+            x = (Math.random() - 0.5) * 100;
+            z = (Math.random() - 0.5) * 100;
+            if (isPositionFree(x, z, 1)) break;
+            tries++;
+        }
+    }
+
+    const h = groundHeightAt(x, z);
+    camera.position.set(x, h + EYE_HEIGHT, z);
+}
+
+/* ---------- DÉCOR : TOUS LES OBJETS UTILISENT groundHeightAt ---------- */
+
+function generateForest() {
+    const trunkGeo = new THREE.CylinderGeometry(0.35, 0.5, 5, 8);
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5E3B1F });
+
+    const leavesGeo = new THREE.ConeGeometry(2.5, 6, 8);
+    const leavesMat = new THREE.MeshStandardMaterial({ color: 0x2E5326 });
+
+    let count = 0;
+    let attempts = 0;
+    const maxAttempts = TREE_COUNT * 8;
+
+    while (count < TREE_COUNT && attempts < maxAttempts) {
+        attempts++;
+
+        const x = (Math.random() - 0.5) * 800;
+        const z = (Math.random() - 0.5) * 800;
+        if (Math.sqrt(x * x + z * z) < FORBIDDEN_RADIUS) continue;
+
+        const density = densityAt(x, z);
+        if (density < 0.35) continue;
+
+        const baseHeight = groundHeightAt(x, z);
+
+        const sizeFactor = 0.7 + Math.random() * 2.8;
+        const trunkHeight = 5 * sizeFactor;
+        const foliageHeight = 6 * sizeFactor;
+
+        const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+        trunk.scale.set(1, sizeFactor, 1);
+        trunk.position.set(x, baseHeight + trunkHeight / 2, z);
+
+        const leaves = new THREE.Mesh(leavesGeo, leavesMat);
+        leaves.scale.set(sizeFactor, sizeFactor, sizeFactor);
+        leaves.position.set(
+            x,
+            baseHeight + trunkHeight + foliageHeight / 2,
+            z
+        );
+
+        scene.add(trunk);
+        scene.add(leaves);
+
+        colliders.push({ x, z, radius: 0.8 }); // collision tronc
+
+        count++;
+    }
+}
+
+function generateRocks() {
+    const rockGeo = new THREE.DodecahedronGeometry(1, 0);
+    const rockMat = new THREE.MeshStandardMaterial({
+        color: 0x8A8F8B,
+        roughness: 0.9,
+        metalness: 0.05
+    });
+
+    const ROCK_COUNT = 120;
+    let i = 0;
+    while (i < ROCK_COUNT) {
+        const x = (Math.random() - 0.5) * 800;
+        const z = (Math.random() - 0.5) * 800;
+        if (Math.sqrt(x * x + z * z) < FORBIDDEN_RADIUS) continue;
+
+        const baseHeight = groundHeightAt(x, z);
+
+        const scale = 0.5 + Math.random() * 2.5;
+        const rock = new THREE.Mesh(rockGeo, rockMat);
+        rock.scale.set(scale, scale * (0.6 + Math.random() * 0.8), scale);
+        rock.position.set(x, baseHeight + scale * 0.4, z);
+        rock.rotation.y = Math.random() * Math.PI * 2;
+
+        scene.add(rock);
+        colliders.push({ x, z, radius: 0.8 * scale });
+
+        i++;
+    }
+}
+
+function generateStumps() {
+    const stumpGeo = new THREE.CylinderGeometry(0.6, 0.9, 1.2, 8);
+    const stumpMat = new THREE.MeshStandardMaterial({ color: 0x6E4B2B });
+
+    const STUMP_COUNT = 60;
+    let i = 0;
+    while (i < STUMP_COUNT) {
+        const x = (Math.random() - 0.5) * 800;
+        const z = (Math.random() - 0.5) * 800;
+        if (Math.sqrt(x * x + z * z) < FORBIDDEN_RADIUS) continue;
+
+        const baseHeight = groundHeightAt(x, z);
+
+        const stump = new THREE.Mesh(stumpGeo, stumpMat);
+        stump.position.set(x, baseHeight + 0.6, z);
+        stump.rotation.y = Math.random() * Math.PI * 2;
+        scene.add(stump);
+
+        colliders.push({ x, z, radius: 1 });
+
+        i++;
+    }
+}
+
+function generateBushes() {
+    const bushGeo = new THREE.SphereGeometry(1, 8, 8);
+    const bushMat = new THREE.MeshStandardMaterial({ color: 0x355C33 });
+
+    const BUSH_COUNT = 200;
+    let i = 0;
+    while (i < BUSH_COUNT) {
+        const x = (Math.random() - 0.5) * 800;
+        const z = (Math.random() - 0.5) * 800;
+        if (Math.sqrt(x * x + z * z) < FORBIDDEN_RADIUS) continue;
+
+        const baseHeight = groundHeightAt(x, z);
+
+        const scale = 0.5 + Math.random() * 1.5;
+        const bush = new THREE.Mesh(bushGeo, bushMat);
+        bush.scale.set(scale * 1.5, scale, scale * 1.5);
+        bush.position.set(x, baseHeight + scale * 0.5, z);
+        scene.add(bush);
+
+        colliders.push({ x, z, radius: 0.7 * scale });
+
+        i++;
+    }
+}
+
+/* ---------- CONTRÔLES ---------- */
+
+function setupKeyboardControls() {
+    document.addEventListener('keydown', (e) => {
+        switch (e.code) {
+            case 'KeyW':
+            case 'KeyZ':
+            case 'ArrowUp':
+                keys.forward = true;
+                break;
+            case 'KeyS':
+            case 'ArrowDown':
+                keys.backward = true;
+                break;
+            case 'KeyA':
+            case 'KeyQ':
+            case 'ArrowLeft':
+                keys.left = true;
+                break;
+            case 'KeyD':
+            case 'ArrowRight':
+                keys.right = true;
+                break;
+        }
+    });
+
+    document.addEventListener('keyup', (e) => {
+        switch (e.code) {
+            case 'KeyW':
+            case 'KeyZ':
+            case 'ArrowUp':
+                keys.forward = false;
+                break;
+            case 'KeyS':
+            case 'ArrowDown':
+                keys.backward = false;
+                break;
+            case 'KeyA':
+            case 'KeyQ':
+            case 'ArrowLeft':
+                keys.left = false;
+                break;
+            case 'KeyD':
+            case 'ArrowRight':
+                keys.right = false;
+                break;
+        }
+    });
+}
+
+function setupPointerLock() {
+    const overlay = document.getElementById('start');
+    if (!overlay) {
+        console.warn('#start introuvable, pas de pointer lock.');
+        return;
+    }
+    const button = overlay.querySelector('button');
+    if (!button) {
+        console.warn('Bouton dans #start introuvable.');
+        return;
+    }
+
+    button.addEventListener('click', () => {
+        document.body.requestPointerLock();
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+        isLocked = document.pointerLockElement === document.body;
+        overlay.style.display = isLocked ? 'none' : 'flex';
+    });
+
+    document.addEventListener('mousemove', (event) => {
+        if (!isLocked) return;
+
+        const sensitivity = 0.002;
+        yaw   -= event.movementX * sensitivity;
+        pitch -= event.movementY * sensitivity;
+
+        const maxPitch = Math.PI / 2 - 0.01;
+        pitch = Math.max(-maxPitch, Math.min(maxPitch, pitch));
+
+        camera.rotation.set(pitch, yaw, 0, 'YXZ');
+    });
+}
+
+/* ---------- DÉPLACEMENT / COLLISIONS ---------- */
+
+function movePlayer(delta) {
+    const moveDir = new THREE.Vector3();
+
+    const forward = new THREE.Vector3(0, 0, -1)
+        .applyEuler(new THREE.Euler(0, yaw, 0, 'YXZ'));
+    const right = new THREE.Vector3(1, 0, 0)
+        .applyEuler(new THREE.Euler(0, yaw, 0, 'YXZ'));
+
+    if (keys.forward)  moveDir.add(forward);
+    if (keys.backward) moveDir.sub(forward);
+    if (keys.left)     moveDir.sub(right);
+    if (keys.right)    moveDir.add(right);
+
+    if (moveDir.lengthSq() === 0) return;
+
+    moveDir.normalize().multiplyScalar(MOVE_SPEED * delta);
+    moveDir.y = 0;
+
+    const candidateX = camera.position.x + moveDir.x;
+    const candidateZ = camera.position.z + moveDir.z;
+
+    // collisions en XZ
+    for (const col of colliders) {
+        const dx = candidateX - col.x;
+        const dz = candidateZ - col.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < col.radius + PLAYER_RADIUS) {
+            return;
+        }
+    }
+
+    const h = groundHeightAt(candidateX, candidateZ);
+    camera.position.set(candidateX, h + EYE_HEIGHT, candidateZ);
+}
+
+/* ---------- ANIMATION ---------- */
+
+function animate(time) {
+    const delta = (time - lastTime) / 1000;
+    lastTime = time;
+
+    if (isLocked) movePlayer(delta);
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+}
+
+/* ---------- RESIZE ---------- */
+
+function onResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+/* LANCEMENT IMMÉDIAT (PAS DE DOMContentLoaded) */
+init();
+requestAnimationFrame(animate);
+</script>
+
+
+</body>
+</html>
